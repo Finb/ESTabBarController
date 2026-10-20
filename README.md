@@ -38,6 +38,8 @@ In real-world development, we may encounter the situation of customizing the UIT
 * ARC
 * Swift 5 or later
 
+> On iOS 26 and later, ESTabBarController keeps the classic flat tab bar by hiding the system Liquid Glass chrome. This uses private UIKit class names and may need updates in future iOS releases. Mixing native `UITabBarItem`s with `ESTabBarItem`s is not supported on iOS 26+. To keep the rest of the app on the legacy design as well, set `UIDesignRequiresCompatibility` in Info.plist.
+
 ## Demo
 
 You can download and build ESTabBarControllerExample project, and you will find more examples to use ESTabBarController, and also more examples to customize UITabBar。

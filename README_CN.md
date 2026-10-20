@@ -39,6 +39,8 @@
 * ARC
 * Swift 5 or later
 
+> iOS 26 及以上版本中，ESTabBarController 会隐藏系统的 Liquid Glass TabBar 玻璃层，继续保持原有的扁平样式。该兼容逻辑依赖 UIKit 私有类名，未来 iOS 版本可能需要跟进调整；iOS 26+ 下暂不支持原生 `UITabBarItem` 与 `ESTabBarItem` 混用。如果希望整个 App 也继续使用旧版设计，可在 Info.plist 中设置 `UIDesignRequiresCompatibility`。
+
 ## Demo
 
 下载后运行ESTabBarControllerExample工程，你可以看到一些使用ESTabBarController实现的自定义TabBar的更多例子。

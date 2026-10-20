@@ -154,7 +154,23 @@ open class ESTabBar: UITabBar {
     
     open override func layoutSubviews() {
         super.layoutSubviews()
+        self.applyLiquidGlassCompatibilityIfNeeded()
         self.updateLayout()
+    }
+    
+    open override func didAddSubview(_ subview: UIView) {
+        super.didAddSubview(subview)
+        if #available(iOS 26.0, *), hasCustomItems {
+            self.suppressLiquidGlassChrome(in: subview)
+            self.disableContinuousSelectionGestures(in: subview)
+        }
+    }
+    
+    open override func addGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) {
+        super.addGestureRecognizer(gestureRecognizer)
+        if #available(iOS 26.0, *), hasCustomItems, ESTabBar.isContinuousSelectionGestureRecognizer(gestureRecognizer) {
+            gestureRecognizer.isEnabled = false
+        }
     }
     
     open override func sizeThatFits(_ size: CGSize) -> CGSize {
@@ -177,6 +193,52 @@ open class ESTabBar: UITabBar {
         return b
     }
     
+    private var hasCustomItems: Bool {
+        return items?.contains(where: { $0 is ESTabBarItem }) ?? false
+    }
+    
+    private func applyLiquidGlassCompatibilityIfNeeded() {
+        if #available(iOS 26.0, *), hasCustomItems {
+            self.suppressLiquidGlassChrome(in: self)
+            self.disableContinuousSelectionGestures(in: self)
+            for container in containers {
+                self.bringSubviewToFront(container)
+            }
+        }
+    }
+    
+    private func suppressLiquidGlassChrome(in view: UIView) {
+        if ESTabBar.isLiquidGlassChromeView(view) {
+            view.isHidden = true
+        }
+        for subview in view.subviews {
+            self.suppressLiquidGlassChrome(in: subview)
+        }
+    }
+    
+    private func disableContinuousSelectionGestures(in view: UIView) {
+        for gestureRecognizer in view.gestureRecognizers ?? [] {
+            if ESTabBar.isContinuousSelectionGestureRecognizer(gestureRecognizer) {
+                gestureRecognizer.isEnabled = false
+            }
+        }
+        for subview in view.subviews {
+            self.disableContinuousSelectionGestures(in: subview)
+        }
+    }
+    
+    private static func isLiquidGlassChromeView(_ view: UIView) -> Bool {
+        let className = NSStringFromClass(type(of: view))
+        guard className.contains("UITabBar") else {
+            return false
+        }
+        return className.hasSuffix("PlatterView") || className.hasSuffix("GlassBackground")
+    }
+    
+    private static func isContinuousSelectionGestureRecognizer(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        return NSStringFromClass(type(of: gestureRecognizer)).hasSuffix("_UIContinuousSelectionGestureRecognizer")
+    }
+    
 }
 
 internal extension ESTabBar /* Layout */ {
@@ -187,77 +249,147 @@ internal extension ESTabBar /* Layout */ {
             return
         }
         
-        let tabBarButtons = subviews.filter { subview -> Bool in
-            if let cls = NSClassFromString("UITabBarButton") {
-                return subview.isKind(of: cls)
-            }
-            return false
-            } .sorted { (subview1, subview2) -> Bool in
-                return subview1.frame.origin.x < subview2.frame.origin.x
-        }
+        let tabBarButtons = systemTabBarButtons()
+        let usesFlatLayout = self.usesFlatLayout()
         
         if isCustomizing {
-            for (idx, _) in tabBarItems.enumerated() {
+            for (idx, _) in tabBarItems.enumerated() where idx < tabBarButtons.count {
                 tabBarButtons[idx].isHidden = false
-                moreContentView?.isHidden = true
             }
-            for (_, container) in containers.enumerated(){
+            moreContentView?.isHidden = true
+            for container in containers {
                 container.isHidden = true
+            }
+            return
+        }
+        
+        for container in containers {
+            container.isHidden = false
+        }
+        
+        if usesFlatLayout {
+            for tabBarButton in tabBarButtons {
+                tabBarButton.isHidden = true
             }
         } else {
             for (idx, item) in tabBarItems.enumerated() {
-                if let _ = item as? ESTabBarItem {
-                    tabBarButtons[idx].isHidden = true
-                } else {
-                    tabBarButtons[idx].isHidden = false
+                guard idx < tabBarButtons.count else {
+                    continue
                 }
-                if isMoreItem(idx), let _ = moreContentView {
-                    tabBarButtons[idx].isHidden = true
-                }
-            }
-            for (_, container) in containers.enumerated(){
-                container.isHidden = false
+                let isCustomItem = item is ESTabBarItem || (isMoreItem(idx) && moreContentView != nil)
+                tabBarButtons[idx].isHidden = isCustomItem
             }
         }
         
-        var layoutBaseSystem = true
         if let itemCustomPositioning = itemCustomPositioning {
             switch itemCustomPositioning {
-            case .fill, .automatic, .centered:
-                break
             case .fillIncludeSeparator, .fillExcludeSeparator:
-                layoutBaseSystem = false
-            }
-        }
-        
-        if layoutBaseSystem {
-            // System itemPositioning
-            for (idx, container) in containers.enumerated(){
-                if !tabBarButtons[idx].frame.isEmpty {
-                    container.frame = tabBarButtons[idx].frame
-                }
-            }
-        } else {
-            // Custom itemPositioning
-            var x: CGFloat = itemEdgeInsets.left
-            var y: CGFloat = itemEdgeInsets.top
-            switch itemCustomPositioning! {
-            case .fillExcludeSeparator:
-                if y <= 0.0 {
-                    y += 1.0
-                }
+                self.layoutContainers(withCustomPositioning: itemCustomPositioning)
+                return
             default:
                 break
             }
-            let width = bounds.size.width - itemEdgeInsets.left - itemEdgeInsets.right
-            let height = bounds.size.height - y - itemEdgeInsets.bottom
-            let eachWidth = itemWidth == 0.0 ? width / CGFloat(containers.count) : itemWidth
-            let eachSpacing = itemSpacing == 0.0 ? 0.0 : itemSpacing
-            
+        }
+        
+        if !usesFlatLayout, self.canUseSystemLayout(tabBarButtons: tabBarButtons) {
+            for (idx, container) in containers.enumerated() {
+                container.frame = tabBarButtons[idx].frame
+            }
+            return
+        }
+        
+        self.layoutContainersWithFlatStyle()
+    }
+    
+    private func systemTabBarButtons() -> [UIView] {
+        return subviews.filter { subview in
+            return NSStringFromClass(type(of: subview)).hasSuffix("UITabBarButton")
+            }.sorted { (subview1, subview2) -> Bool in
+                return subview1.frame.origin.x < subview2.frame.origin.x
+        }
+    }
+    
+    private func usesFlatLayout() -> Bool {
+        if #available(iOS 26.0, *) {
+            return hasCustomItems
+        }
+        return false
+    }
+    
+    private func canUseSystemLayout(tabBarButtons: [UIView]) -> Bool {
+        guard tabBarButtons.count >= containers.count else {
+            return false
+        }
+        for idx in containers.indices {
+            if tabBarButtons[idx].frame.isEmpty {
+                return false
+            }
+        }
+        return true
+    }
+    
+    private func layoutContainers(withCustomPositioning positioning: ESTabBarItemPositioning) {
+        guard !containers.isEmpty else {
+            return
+        }
+        var x: CGFloat = itemEdgeInsets.left
+        var y: CGFloat = itemEdgeInsets.top
+        if positioning == .fillExcludeSeparator, y <= 0.0 {
+            y += 1.0
+        }
+        let width = max(0.0, bounds.size.width - itemEdgeInsets.left - itemEdgeInsets.right)
+        let height = max(0.0, bounds.size.height - y - itemEdgeInsets.bottom)
+        let eachWidth = itemWidth == 0.0 ? width / CGFloat(containers.count) : itemWidth
+        let eachSpacing = itemSpacing == 0.0 ? 0.0 : itemSpacing
+        
+        for container in containers {
+            container.frame = CGRect.init(x: x, y: y, width: eachWidth, height: height)
+            x += eachWidth
+            x += eachSpacing
+        }
+    }
+    
+    private func layoutContainersWithFlatStyle() {
+        guard !containers.isEmpty else {
+            return
+        }
+        
+        var bottomInset: CGFloat = 0.0
+        if #available(iOS 11.0, *) {
+            bottomInset = safeAreaInsets.bottom
+        }
+        let rawHeight = max(0.0, bounds.size.height - bottomInset - itemEdgeInsets.top - itemEdgeInsets.bottom)
+        var itemHeight = rawHeight
+        if traitCollection.horizontalSizeClass == .compact, itemHeight > 49.0 {
+            itemHeight = 49.0
+        }
+        let y = itemEdgeInsets.top
+        
+        var centersItems = false
+        if let positioning = itemCustomPositioning {
+            centersItems = positioning == .centered || (positioning == .automatic && traitCollection.horizontalSizeClass == .regular)
+        }
+        
+        if centersItems {
+            var width = itemWidth
+            if width <= 0.0 {
+                width = 80.0
+            }
+            let spacing = itemSpacing > 0.0 ? itemSpacing : 0.0
+            let totalWidth = width * CGFloat(containers.count) + spacing * CGFloat(max(0, containers.count - 1))
+            var x = max(itemEdgeInsets.left, (bounds.size.width - totalWidth) / 2.0)
             for container in containers {
-                container.frame = CGRect.init(x: x, y: y, width: eachWidth, height: height)
-                x += eachWidth
-                x += eachSpacing
+                container.frame = CGRect.init(x: x, y: y, width: width, height: itemHeight)
+                x += width + spacing
+            }
+        } else {
+            let availableWidth = max(0.0, bounds.size.width - itemEdgeInsets.left - itemEdgeInsets.right)
+            let width = itemWidth > 0.0 ? itemWidth : availableWidth / CGFloat(containers.count)
+            let spacing = itemSpacing > 0.0 ? itemSpacing : 0.0
+            var x = itemEdgeInsets.left
+            for container in containers {
+                container.frame = CGRect.init(x: x, y: y, width: width, height: itemHeight)
+                x += width + spacing
             }
         }
     }
@@ -296,6 +428,7 @@ internal extension ESTabBar /* Actions */ {
         }
         
         self.updateAccessibilityLabels()
+        self.applyLiquidGlassCompatibilityIfNeeded()
         self.setNeedsLayout()
     }
     
