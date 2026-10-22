@@ -118,6 +118,17 @@ open class ESTabBar: UITabBar {
     internal var containers = [ESTabBarItemContainer]()
     /// 缓存当前tabBarController用来判断是否存在"More"Tab
     internal weak var tabBarController: UITabBarController?
+    /// 当前是否处于竖向控制栏布局（iPhone Duo 等设备的 shared bar）。
+    /// 只读；每次 layout 时自动更新。
+    public private(set) var isVerticalLayout: Bool = false
+    /// item 容器的 frame（tabBar 坐标）。
+    /// iOS 27.1 Duo 上系统可能把 tabBar 放到零高度容器中导致触摸无法路由，调用方可据此做兜底命中。
+    public var itemFrames: [CGRect] {
+        containers.map { $0.frame }
+    }
+    #if DEBUG
+    private var lastDebugLayoutDescription: String?
+    #endif
     /// 自定义'More'按钮样式，继承自ESTabBarItemContentView
     open var moreContentView: ESTabBarItemContentView? = ESTabBarItemMoreContentView.init() {
         didSet { self.reload() }
@@ -156,6 +167,9 @@ open class ESTabBar: UITabBar {
         super.layoutSubviews()
         self.applyLiquidGlassCompatibilityIfNeeded()
         self.updateLayout()
+        #if DEBUG
+        self.debugLogLayoutIfNeeded()
+        #endif
     }
     
     open override func didAddSubview(_ subview: UIView) {
@@ -249,8 +263,8 @@ internal extension ESTabBar /* Layout */ {
             return
         }
         
+        let vertical = updateVerticalLayoutState()
         let tabBarButtons = systemTabBarButtons()
-        let usesFlatLayout = self.usesFlatLayout()
         
         if isCustomizing {
             for (idx, _) in tabBarItems.enumerated() where idx < tabBarButtons.count {
@@ -267,17 +281,32 @@ internal extension ESTabBar /* Layout */ {
             container.isHidden = false
         }
         
+        if vertical {
+            // Native-only usage must keep the system tab bar untouched.
+            if hasCustomItems {
+                layoutContainersWithVerticalControlBar(tabBarItems: tabBarItems, tabBarButtons: tabBarButtons)
+            }
+            return
+        }
+        
+        let orderedTabBarButtons = tabBarButtons.sorted { (view1, view2) -> Bool in
+            let frame1 = self.convert(view1.bounds, from: view1)
+            let frame2 = self.convert(view2.bounds, from: view2)
+            return frame1.origin.x < frame2.origin.x
+        }
+        let usesFlatLayout = self.usesFlatLayout()
+        
         if usesFlatLayout {
-            for tabBarButton in tabBarButtons {
+            for tabBarButton in orderedTabBarButtons {
                 tabBarButton.isHidden = true
             }
         } else {
             for (idx, item) in tabBarItems.enumerated() {
-                guard idx < tabBarButtons.count else {
+                guard idx < orderedTabBarButtons.count else {
                     continue
                 }
                 let isCustomItem = item is ESTabBarItem || (isMoreItem(idx) && moreContentView != nil)
-                tabBarButtons[idx].isHidden = isCustomItem
+                orderedTabBarButtons[idx].isHidden = isCustomItem
             }
         }
         
@@ -291,9 +320,9 @@ internal extension ESTabBar /* Layout */ {
             }
         }
         
-        if !usesFlatLayout, self.canUseSystemLayout(tabBarButtons: tabBarButtons) {
+        if !usesFlatLayout, self.canUseSystemLayout(tabBarButtons: orderedTabBarButtons) {
             for (idx, container) in containers.enumerated() {
-                container.frame = tabBarButtons[idx].frame
+                container.frame = self.convert(orderedTabBarButtons[idx].bounds, from: orderedTabBarButtons[idx])
             }
             return
         }
@@ -301,12 +330,214 @@ internal extension ESTabBar /* Layout */ {
         self.layoutContainersWithFlatStyle()
     }
     
-    private func systemTabBarButtons() -> [UIView] {
-        return subviews.filter { subview in
-            return NSStringFromClass(type(of: subview)).hasSuffix("UITabBarButton")
-            }.sorted { (subview1, subview2) -> Bool in
-                return subview1.frame.origin.x < subview2.frame.origin.x
+    private func updateVerticalLayoutState() -> Bool {
+        let vertical = bounds.height > bounds.width + 0.5
+        if vertical != isVerticalLayout {
+            isVerticalLayout = vertical
+            applyVerticalLayoutState()
         }
+        return vertical
+    }
+    
+    private func applyVerticalLayoutState() {
+        guard let tabBarItems = items else {
+            return
+        }
+        for item in tabBarItems {
+            if let item = item as? ESTabBarItem {
+                item.contentView.isVerticalLayout = isVerticalLayout
+            }
+        }
+        moreContentView?.isVerticalLayout = isVerticalLayout
+    }
+    
+    private func layoutContainersWithVerticalControlBar(tabBarItems: [UITabBarItem], tabBarButtons: [UIView]) {
+        for tabBarButton in tabBarButtons {
+            tabBarButton.isHidden = true
+        }
+        
+        if let frames = verticalItemFrames(for: tabBarItems, tabBarButtons: tabBarButtons) {
+            for (idx, container) in containers.enumerated() where idx < frames.count {
+                container.frame = frames[idx]
+            }
+            return
+        }
+        
+        layoutContainersWithVerticalFallback()
+    }
+    
+    private func verticalItemFrames(for tabBarItems: [UITabBarItem], tabBarButtons: [UIView]) -> [CGRect]? {
+        guard !tabBarButtons.isEmpty else {
+            return nil
+        }
+        let pairs = tabBarButtons.compactMap { (button: UIView) -> (UIView, CGRect)? in
+            let frame = self.convert(button.bounds, from: button)
+            guard !frame.isEmpty, self.bounds.intersects(frame) else {
+                return nil
+            }
+            return (button, frame)
+        }
+        guard pairs.count >= containers.count else {
+            return nil
+        }
+        
+        let orderedPairs: [(UIView, CGRect)]
+        if let matched = matchSystemButtonsToItems(pairs, items: tabBarItems), matched.count >= containers.count {
+            orderedPairs = matched
+        } else {
+            orderedPairs = pairs.sorted { $0.1.origin.y < $1.1.origin.y }
+        }
+        return Array(orderedPairs.prefix(containers.count).map { $0.1 })
+    }
+    
+    private func matchSystemButtonsToItems(_ pairs: [(UIView, CGRect)], items: [UITabBarItem]) -> [(UIView, CGRect)]? {
+        var matched: [(Int, UIView, CGRect)] = []
+        for (button, frame) in pairs {
+            if let index = itemIndex(for: button, items: items) {
+                matched.append((index, button, frame))
+            }
+        }
+        guard matched.count == pairs.count, matched.count >= items.count else {
+            return nil
+        }
+        guard Set(matched.map { $0.0 }).count == matched.count else {
+            return nil
+        }
+        return matched.sorted { $0.0 < $1.0 }.map { ($0.1, $0.2) }
+    }
+    
+    private func itemIndex(for button: UIView, items: [UITabBarItem]) -> Int? {
+        let labels = [button.accessibilityIdentifier, button.accessibilityLabel].compactMap { $0 }.filter { !$0.isEmpty }
+        guard !labels.isEmpty else {
+            return nil
+        }
+        for (idx, item) in items.enumerated() {
+            if let identifier = item.accessibilityIdentifier, !identifier.isEmpty, labels.contains(identifier) {
+                return idx
+            }
+            if let title = item.title, !title.isEmpty, labels.contains(where: { $0.contains(title) }) {
+                return idx
+            }
+        }
+        return nil
+    }
+    
+    private func layoutContainersWithVerticalFallback() {
+        guard !containers.isEmpty else {
+            return
+        }
+        let insets = layoutSafeAreaInsets
+        let verticalSafeInsets = insets.top + insets.bottom
+        let insetTop = verticalSafeInsets < bounds.height ? insets.top : 0
+        let insetBottom = verticalSafeInsets < bounds.height ? insets.bottom : 0
+        let top = insetTop + itemEdgeInsets.top
+        let bottom = insetBottom + itemEdgeInsets.bottom
+        let height = max(0, bounds.height - top - bottom)
+        guard height > 0 else {
+            return
+        }
+        
+        let left: CGFloat
+        let width: CGFloat
+        if let column = verticalBarColumnRect() {
+            // The system vertical bar is a narrow column near the window edge. Center the
+            // items in that column so they line up with the status bar icons.
+            left = column.minX
+            width = column.width
+        } else {
+            // The vertical bar is already positioned inside the window's trailing safe area.
+            // UIKit can report a horizontal safe area larger than the bar itself; applying it
+            // would collapse the item width to zero.
+            let horizontalSafeInsets = insets.left + insets.right
+            let insetLeft = horizontalSafeInsets < bounds.width ? insets.left : 0
+            let insetRight = horizontalSafeInsets < bounds.width ? insets.right : 0
+            var fallbackLeft = insetLeft + itemEdgeInsets.left
+            var fallbackWidth = max(0, bounds.width - fallbackLeft - insetRight - itemEdgeInsets.right)
+            if fallbackWidth <= 0 {
+                fallbackLeft = itemEdgeInsets.left
+                fallbackWidth = max(0, bounds.width - itemEdgeInsets.left - itemEdgeInsets.right)
+            }
+            left = fallbackLeft
+            width = fallbackWidth
+        }
+        guard width > 0 else {
+            return
+        }
+        
+        let count = CGFloat(containers.count)
+        let itemHeight = min(49.0, height / count)
+        let totalHeight = itemHeight * count
+        // The system anchors the tab bar toward the bottom of the vertical rail.
+        var y = top + max(0, height - totalHeight)
+        for container in containers {
+            container.frame = CGRect(x: left, y: y, width: width, height: itemHeight)
+            y += itemHeight
+        }
+    }
+    
+    private func verticalBarColumnRect() -> CGRect? {
+        guard #available(iOS 27.1, *) else {
+            return nil
+        }
+        guard let window = self.window else {
+            return nil
+        }
+        let rectEdge: UIRectEdge
+        switch traitCollection.verticalBarEdge {
+        case .leading:
+            rectEdge = .left
+        case .trailing:
+            rectEdge = .right
+        case .unspecified:
+            let barFrame = self.convert(self.bounds, to: window)
+            rectEdge = barFrame.midX > window.bounds.midX ? .right : .left
+        @unknown default:
+            return nil
+        }
+        // 48pt is the measured width of the system's vertical tab column on iPhone Duo (iOS 27.1).
+        let region = UIView.LayoutRegion.bar(onEdge: rectEdge, extent: 48.0)
+        let edgeInsets = window.edgeInsets(for: region)
+        let columnInWindow = window.bounds.inset(by: edgeInsets)
+        guard columnInWindow.width > 0, columnInWindow.height > 0 else {
+            return nil
+        }
+        let column = self.convert(columnInWindow, from: window)
+        guard column.width > 0, column.height > 0 else {
+            return nil
+        }
+        return column
+    }
+    
+    private func systemTabBarButtons() -> [UIView] {
+        var buttons = [UIView]()
+        collectSystemTabBarButtons(in: self, into: &buttons)
+        let buttonIdentifiers = Set(buttons.map { ObjectIdentifier($0) })
+        return buttons.filter { button in
+            var ancestor = button.superview
+            while let view = ancestor {
+                if buttonIdentifiers.contains(ObjectIdentifier(view)) {
+                    return false
+                }
+                ancestor = view.superview
+            }
+            return true
+        }
+    }
+    
+    private func collectSystemTabBarButtons(in view: UIView, into buttons: inout [UIView]) {
+        for subview in view.subviews {
+            if NSStringFromClass(type(of: subview)).hasSuffix("UITabBarButton") {
+                buttons.append(subview)
+            }
+            collectSystemTabBarButtons(in: subview, into: &buttons)
+        }
+    }
+    
+    private var layoutSafeAreaInsets: UIEdgeInsets {
+        if #available(iOS 11.0, *) {
+            return safeAreaInsets
+        }
+        return .zero
     }
     
     private func usesFlatLayout() -> Bool {
@@ -321,7 +552,8 @@ internal extension ESTabBar /* Layout */ {
             return false
         }
         for idx in containers.indices {
-            if tabBarButtons[idx].frame.isEmpty {
+            let frame = self.convert(tabBarButtons[idx].bounds, from: tabBarButtons[idx])
+            if frame.isEmpty {
                 return false
             }
         }
@@ -354,45 +586,175 @@ internal extension ESTabBar /* Layout */ {
             return
         }
         
-        var bottomInset: CGFloat = 0.0
-        if #available(iOS 11.0, *) {
-            bottomInset = safeAreaInsets.bottom
-        }
-        let rawHeight = max(0.0, bounds.size.height - bottomInset - itemEdgeInsets.top - itemEdgeInsets.bottom)
+        let insets = layoutSafeAreaInsets
+        let left = insets.left + itemEdgeInsets.left
+        let right = insets.right + itemEdgeInsets.right
+        let top = insets.top + itemEdgeInsets.top
+        let bottom = insets.bottom + itemEdgeInsets.bottom
+        let availableWidth = max(0, bounds.width - left - right)
+        let rawHeight = max(0, bounds.height - top - bottom)
         var itemHeight = rawHeight
-        if traitCollection.horizontalSizeClass == .compact, itemHeight > 49.0 {
+        if (traitCollection.horizontalSizeClass == .compact || traitCollection.userInterfaceIdiom == .phone), itemHeight > 49.0 {
             itemHeight = 49.0
         }
-        let y = itemEdgeInsets.top
+        guard availableWidth > 0, itemHeight > 0 else {
+            return
+        }
+        let contentRect = CGRect(x: left, y: top, width: availableWidth, height: itemHeight)
         
         var centersItems = false
         if let positioning = itemCustomPositioning {
             centersItems = positioning == .centered || (positioning == .automatic && traitCollection.horizontalSizeClass == .regular)
         }
         
-        if centersItems {
-            var width = itemWidth
-            if width <= 0.0 {
-                width = 80.0
-            }
-            let spacing = itemSpacing > 0.0 ? itemSpacing : 0.0
-            let totalWidth = width * CGFloat(containers.count) + spacing * CGFloat(max(0, containers.count - 1))
-            var x = max(itemEdgeInsets.left, (bounds.size.width - totalWidth) / 2.0)
-            for container in containers {
-                container.frame = CGRect.init(x: x, y: y, width: width, height: itemHeight)
-                x += width + spacing
+        let segments = horizontalLayoutSegments(in: contentRect)
+        if segments.count > 1, containers.count >= segments.count {
+            let counts = containerCounts(for: containers.count, segments: segments)
+            var start = 0
+            for (segment, count) in zip(segments, counts) {
+                let end = min(start + count, containers.count)
+                if start < end {
+                    layoutContainers(containers[start..<end], in: segment, centersItems: centersItems)
+                }
+                start = end
             }
         } else {
-            let availableWidth = max(0.0, bounds.size.width - itemEdgeInsets.left - itemEdgeInsets.right)
-            let width = itemWidth > 0.0 ? itemWidth : availableWidth / CGFloat(containers.count)
-            let spacing = itemSpacing > 0.0 ? itemSpacing : 0.0
-            var x = itemEdgeInsets.left
-            for container in containers {
-                container.frame = CGRect.init(x: x, y: y, width: width, height: itemHeight)
-                x += width + spacing
-            }
+            layoutContainers(containers[...], in: contentRect, centersItems: centersItems)
         }
     }
+    
+    private func layoutContainers(_ group: ArraySlice<ESTabBarItemContainer>, in rect: CGRect, centersItems: Bool) {
+        guard !group.isEmpty, rect.width > 0, rect.height > 0 else {
+            return
+        }
+        let count = CGFloat(group.count)
+        let spacing = itemSpacing > 0.0 ? itemSpacing : 0.0
+        var width = itemWidth
+        if width <= 0.0 {
+            width = centersItems ? 80.0 : rect.width / count
+        }
+        var totalWidth = width * count + spacing * CGFloat(max(0, group.count - 1))
+        if totalWidth > rect.width {
+            width = max(0, (rect.width - spacing * CGFloat(max(0, group.count - 1))) / count)
+            totalWidth = width * count + spacing * CGFloat(max(0, group.count - 1))
+        }
+        var x = rect.minX
+        if centersItems {
+            x += max(0, (rect.width - totalWidth) / 2.0)
+        }
+        for container in group {
+            container.frame = CGRect(x: x, y: rect.minY, width: width, height: rect.height)
+            x += width + spacing
+        }
+    }
+    
+    private func horizontalLayoutSegments(in rect: CGRect) -> [CGRect] {
+        var segments = [rect]
+        if #available(iOS 27.1, *) {
+            let regions = self.reservedRegions(kind: .division)
+            for region in regions where region.isActive {
+                let reserved = region.frame
+                guard reserved.maxX > rect.minX, reserved.minX < rect.maxX else {
+                    continue
+                }
+                var next = [CGRect]()
+                for segment in segments {
+                    if reserved.maxX <= segment.minX || reserved.minX >= segment.maxX {
+                        next.append(segment)
+                        continue
+                    }
+                    let leftWidth = max(0, reserved.minX - segment.minX)
+                    if leftWidth > 0 {
+                        next.append(CGRect(x: segment.minX, y: segment.minY, width: leftWidth, height: segment.height))
+                    }
+                    let rightStart = max(segment.minX, reserved.maxX)
+                    let rightWidth = max(0, segment.maxX - rightStart)
+                    if rightWidth > 0 {
+                        next.append(CGRect(x: rightStart, y: segment.minY, width: rightWidth, height: segment.height))
+                    }
+                }
+                segments = next
+            }
+        }
+        let result = segments.filter { $0.width > 0 }.sorted { $0.minX < $1.minX }
+        return result.isEmpty ? [rect] : result
+    }
+    
+    private func containerCounts(for total: Int, segments: [CGRect]) -> [Int] {
+        guard !segments.isEmpty else {
+            return []
+        }
+        if total <= segments.count {
+            return segments.enumerated().map { $0.offset < total ? 1 : 0 }
+        }
+        let totalWidth = segments.reduce(0) { $0 + $1.width }
+        guard totalWidth > 0 else {
+            return segments.map { _ in 0 }
+        }
+        var counts = segments.map { segment in
+            max(1, Int((CGFloat(total) * segment.width / totalWidth).rounded()))
+        }
+        var sum = counts.reduce(0, +)
+        while sum > total {
+            if let index = counts.indices.filter({ counts[$0] > 1 }).max(by: { segments[$0].width < segments[$1].width }) {
+                counts[index] -= 1
+                sum -= 1
+            } else {
+                break
+            }
+        }
+        while sum < total {
+            if let index = segments.indices.max(by: { segments[$0].width / CGFloat(max(1, counts[$0])) < segments[$1].width / CGFloat(max(1, counts[$1])) }) {
+                counts[index] += 1
+                sum += 1
+            } else {
+                break
+            }
+        }
+        return counts
+    }
+    
+    #if DEBUG
+    private var isDebugLayoutLoggingEnabled: Bool {
+        return ProcessInfo.processInfo.environment["ESTAB_BAR_DEBUG_LAYOUT"] == "1"
+    }
+    
+    private func debugDescription(of view: UIView, depth: Int) -> String {
+        guard depth < 3 else {
+            return ""
+        }
+        return view.subviews.map { subview in
+            let nested = debugDescription(of: subview, depth: depth + 1)
+            let description = "\(NSStringFromClass(type(of: subview))) frame=\(subview.frame) hidden=\(subview.isHidden)"
+            return nested.isEmpty ? description : "\(description) [\(nested)]"
+        }.joined(separator: " | ")
+    }
+    
+    private func debugLogLayoutIfNeeded() {
+        guard isDebugLayoutLoggingEnabled else {
+            return
+        }
+        var lines = [String]()
+        lines.append("ESTabBar vertical=\(isVerticalLayout) bounds=\(bounds) frame=\(frame) safe=\(layoutSafeAreaInsets) window=\(String(describing: window?.bounds))")
+        if #available(iOS 27.1, *) {
+            lines.append("verticalBarEdge=\(traitCollection.verticalBarEdge.rawValue)")
+            let regions = self.reservedRegions(kind: .division)
+            lines.append("division=\(regions.map { "\($0.frame) active=\($0.isActive)" })")
+            lines.append("column=\(String(describing: verticalBarColumnRect()))")
+        }
+        lines.append("margins=\(layoutMargins) windowSafe=\(String(describing: window?.safeAreaInsets))")
+        lines.append("super=\(String(describing: superview.map { "\(NSStringFromClass(type(of: $0))) frame=\($0.frame) bounds=\($0.bounds)" }))")
+        lines.append("subviews=\(debugDescription(of: self, depth: 0))")
+        lines.append("buttons=\(systemTabBarButtons().map { "\(NSStringFromClass(type(of: $0))) frame=\(convert($0.bounds, from: $0)) hidden=\($0.isHidden)" })")
+        lines.append("containers=\(containers.map { "\($0.frame)" })")
+        lines.append("items=\(items?.map { $0.title ?? "" } ?? [])")
+        let description = lines.joined(separator: "\n")
+        if description != lastDebugLayoutDescription {
+            lastDebugLayoutDescription = description
+            NSLog("%@", description)
+        }
+    }
+    #endif
 }
 
 internal extension ESTabBar /* Actions */ {
@@ -420,9 +782,11 @@ internal extension ESTabBar /* Actions */ {
             self.containers.append(container)
             
             if let item = item as? ESTabBarItem {
+                item.contentView.isVerticalLayout = self.isVerticalLayout
                 container.addSubview(item.contentView)
             }
             if self.isMoreItem(idx), let moreContentView = moreContentView {
+                moreContentView.isVerticalLayout = self.isVerticalLayout
                 container.addSubview(moreContentView)
             }
         }

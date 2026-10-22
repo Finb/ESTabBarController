@@ -40,6 +40,10 @@ In real-world development, we may encounter the situation of customizing the UIT
 
 > On iOS 26 and later, ESTabBarController keeps the classic flat tab bar by hiding the system Liquid Glass chrome. This uses private UIKit class names and may need updates in future iOS releases. Mixing native `UITabBarItem`s with `ESTabBarItem`s is not supported on iOS 26+. To keep the rest of the app on the legacy design as well, set `UIDesignRequiresCompatibility` in Info.plist.
 
+> On iPhone Duo (iOS 27.1) the system can place the tab bar in a vertical control bar. ESTabBar detects a taller-than-wide bar, lays the items out vertically toward the bottom like the system tab bar, and hides titles by default. Custom `ESTabBarItemContentView` subclasses can read `isVerticalLayout` in `updateLayout()` to switch to an icon-first layout and a compact badge. The hinge is never used as a layout input; available width comes from safe areas and, on iOS 27.1, active `UIView.ReservedRegion` divisions. Building this version requires the Xcode 27.1 SDK because the vertical-bar and reserved-region APIs are referenced behind availability checks.
+
+> In the vertical bar UIKit hosts the tab bar in a container that is drawn but not hit-testable, so taps never reach the item containers. `ESTabBarController` installs a window-level tap fallback automatically. Override `didTapVerticalBarItem(at:)` to customize tap handling, or set `isVerticalBarTapFallbackEnabled` to `false` if you already provide your own fallback.
+
 ## Demo
 
 You can download and build ESTabBarControllerExample project, and you will find more examples to use ESTabBarController, and also more examples to customize UITabBar。

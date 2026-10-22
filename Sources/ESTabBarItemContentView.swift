@@ -61,6 +61,17 @@ open class ESTabBarItemContentView: UIView {
     
     /// A Boolean value indicating whether the item is enabled, default is `YES`.
     open var enabled = true
+
+    /// Whether the item is currently displayed in a vertical control bar (iPhone Duo).
+    /// Set by `ESTabBar` during layout; read-only for consumers.
+    public internal(set) var isVerticalLayout: Bool = false {
+        didSet {
+            if oldValue != isVerticalLayout {
+                setNeedsLayout()
+                updateLayout()
+            }
+        }
+    }
     
     /// A Boolean value indicating whether the item is selected, default is `NO`.
     open var selected = false
@@ -232,18 +243,43 @@ open class ESTabBarItemContentView: UIView {
         
         imageView.isHidden = (imageView.image == nil)
         titleLabel.isHidden = (titleLabel.text == nil)
+        
+        let displayScale: CGFloat
+        if #available(iOS 13.0, *), let windowScene = window?.windowScene {
+            displayScale = windowScene.traitCollection.displayScale
+        } else {
+            displayScale = traitCollection.displayScale
+        }
+        let usesThreeX = displayScale >= 3.0
+        
+        if isVerticalLayout {
+            titleLabel.isHidden = true
+            let s: CGFloat = usesThreeX ? 23.0 : 20.0
+            if !imageView.isHidden {
+                imageView.frame = CGRect(x: (w - s) / 2.0, y: (h - s) / 2.0, width: s, height: s)
+            }
+            if let _ = badgeView.superview {
+                let size = badgeView.sizeThatFits(self.frame.size)
+                badgeView.frame = CGRect(x: imageView.frame.maxX - size.width / 2.0 + 1.0,
+                                         y: imageView.frame.minY - size.height / 2.0 - 1.0,
+                                         width: size.width,
+                                         height: size.height)
+                badgeView.setNeedsLayout()
+            }
+            return
+        }
 
         if self.itemContentMode == .alwaysTemplate {
             var s: CGFloat = 0.0 // image size
             var f: CGFloat = 0.0 // font
             var isLandscape = false
-            if let keyWindow = UIApplication.shared.keyWindow {
-                isLandscape = keyWindow.bounds.width > keyWindow.bounds.height
+            if let window = self.window {
+                isLandscape = window.bounds.width > window.bounds.height
             }
             let isWide = isLandscape || traitCollection.horizontalSizeClass == .regular // is landscape or regular
             if #available(iOS 11.0, *), isWide {
-                s = UIScreen.main.scale == 3.0 ? 23.0 : 20.0
-                f = UIScreen.main.scale == 3.0 ? 13.0 : 12.0
+                s = usesThreeX ? 23.0 : 20.0
+                f = usesThreeX ? 13.0 : 12.0
             } else {
                 s = 23.0
                 f = 10.0
@@ -253,11 +289,11 @@ open class ESTabBarItemContentView: UIView {
                 titleLabel.font = UIFont.systemFont(ofSize: f)
                 titleLabel.sizeToFit()
                 if #available(iOS 11.0, *), isWide {
-                    titleLabel.frame = CGRect.init(x: (w - titleLabel.bounds.size.width) / 2.0 + (UIScreen.main.scale == 3.0 ? 14.25 : 12.25) + titlePositionAdjustment.horizontal,
+                    titleLabel.frame = CGRect.init(x: (w - titleLabel.bounds.size.width) / 2.0 + (usesThreeX ? 14.25 : 12.25) + titlePositionAdjustment.horizontal,
                                                    y: (h - titleLabel.bounds.size.height) / 2.0 + titlePositionAdjustment.vertical,
                                                    width: titleLabel.bounds.size.width,
                                                    height: titleLabel.bounds.size.height)
-                    imageView.frame = CGRect.init(x: titleLabel.frame.origin.x - s - (UIScreen.main.scale == 3.0 ? 6.0 : 5.0),
+                    imageView.frame = CGRect.init(x: titleLabel.frame.origin.x - s - (usesThreeX ? 6.0 : 5.0),
                                                   y: (h - s) / 2.0,
                                                   width: s,
                                                   height: s)

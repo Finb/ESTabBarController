@@ -51,6 +51,18 @@ open class ESTabBarController: UITabBarController, ESTabBarDelegate {
     open var shouldHijackHandler: ESTabBarControllerShouldHijackHandler?
     /// Hijack select action.
     open var didHijackHandler: ESTabBarControllerDidHijackHandler?
+
+    /// 是否自动处理竖向控制栏（iPhone Duo）中因系统宿主容器不可命中而丢失的 tab 点击。默认 `true`。
+    open var isVerticalBarTapFallbackEnabled: Bool = true
+
+    /// 竖向栏点击被映射到某个 item 时调用。默认实现选中该 item。
+    /// 子类可重写以执行自定义点击逻辑；未处理时调用 `super`。
+    open func didTapVerticalBarItem(at index: Int) {
+        selectedIndex = index
+    }
+
+    /// Duo 竖栏兜底手势，由 window 持有。
+    internal weak var verticalBarFallbackGesture: UITapGestureRecognizer?
     
     /// Observer tabBarController's selectedViewController. change its selection when it will-set.
     open override var selectedViewController: UIViewController? {
@@ -97,6 +109,23 @@ open class ESTabBarController: UITabBarController, ESTabBarDelegate {
             return tabBar
         }()
         self.setValue(tabBar, forKey: "tabBar")
+    }
+
+    open override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        updateVerticalBarTapFallbackIfNeeded()
+    }
+
+    open override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        updateVerticalBarTapFallbackIfNeeded()
+    }
+
+    open override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if !isViewLoaded || view.window == nil {
+            removeVerticalBarTapFallback()
+        }
     }
 
     // MARK: - UITabBar delegate
