@@ -20,6 +20,7 @@ internal extension ESTabBarController {
     }
 
     func updateVerticalBarTapFallbackIfNeeded() {
+        updateVerticalBarHostChromeIfNeeded()
         guard isVerticalBarTapFallbackEnabled, let window = verticalBarWindow else {
             removeVerticalBarTapFallback()
             return
@@ -32,6 +33,36 @@ internal extension ESTabBarController {
         gesture.delegate = self
         window.addGestureRecognizer(gesture)
         verticalBarFallbackGesture = gesture
+    }
+    
+    /// 有些系统版本会把竖栏背景画在 tabBar 的宿主容器上，而不是 tabBar 自身。
+    /// 竖向胶囊布局时临时清空这些祖先的背景色，退出竖向时恢复。
+    private func updateVerticalBarHostChromeIfNeeded() {
+        guard isVerticalBarTapFallbackActive else {
+            restoreVerticalBarHostChrome()
+            return
+        }
+        var host = tabBar.superview
+        while let view = host, view !== self.view {
+            if !verticalBarHostBackgrounds.contains(where: { $0.view === view }),
+               let color = view.backgroundColor,
+               color.cgColor.alpha > 0.01
+            {
+                verticalBarHostBackgrounds.append((view, color))
+                view.backgroundColor = .clear
+            }
+            host = view.superview
+        }
+    }
+    
+    private func restoreVerticalBarHostChrome() {
+        guard !verticalBarHostBackgrounds.isEmpty else {
+            return
+        }
+        for entry in verticalBarHostBackgrounds {
+            entry.view.backgroundColor = entry.color
+        }
+        verticalBarHostBackgrounds.removeAll()
     }
 
     func removeVerticalBarTapFallback() {
@@ -60,7 +91,8 @@ internal extension ESTabBarController {
         let itemFrames = est.itemFrames.filter { $0.width > 1 && $0.height > 1 }
         guard let first = itemFrames.first else { return nil }
         let union = itemFrames.dropFirst().reduce(first) { $0.union($1) }
-        let converted = est.convert(union, to: window)
+        let barRect = est.verticalBarCapsuleFrame ?? union
+        let converted = est.convert(barRect, to: window)
         guard converted.width > 1,
               converted.height > 1,
               window.bounds.intersects(converted)

@@ -41,7 +41,7 @@
 
 > iOS 26 及以上版本中，ESTabBarController 会隐藏系统的 Liquid Glass TabBar 玻璃层，继续保持原有的扁平样式。该兼容逻辑依赖 UIKit 私有类名，未来 iOS 版本可能需要跟进调整；iOS 26+ 下暂不支持原生 `UITabBarItem` 与 `ESTabBarItem` 混用。如果希望整个 App 也继续使用旧版设计，可在 Info.plist 中设置 `UIDesignRequiresCompatibility`。
 
-> iPhone Duo（iOS 27.1）上系统可能把 TabBar 放进竖向控制栏。ESTabBar 通过“高度大于宽度”识别竖向栏并改为纵向排列 item，item 和系统标签栏一样靠下显示，默认隐藏文字；自定义 `ESTabBarItemContentView` 可在 `updateLayout()` 中读取 `isVerticalLayout`，切换为图标优先布局和紧凑徽章。布局不会使用铰链角度，可用宽度来自安全区以及 iOS 27.1 激活的 `UIView.ReservedRegion` 分隔区域。由于竖向栏与 reserved region API 在可用性判断后仍有编译期引用，编译本版本需要 Xcode 27.1 SDK。
+> iPhone Duo（iOS 27.1）上系统可能把 TabBar 放进竖向控制栏。ESTabBar 通过“高度大于宽度”识别竖向栏，清除铺满整条竖栏的系统背景，并用一个带描边、跟随明暗色自适应的悬浮胶囊包裹 item 图标列。item 和系统标签栏一样靠下显示，默认隐藏文字；自定义 `ESTabBarItemContentView` 可在 `updateLayout()` 中读取 `isVerticalLayout`，切换为图标优先布局和紧凑徽章。布局不会使用铰链角度，可用宽度来自安全区以及 iOS 27.1 激活的 `UIView.ReservedRegion` 分隔区域。由于竖向栏与 reserved region API 在可用性判断后仍有编译期引用，编译本版本需要 Xcode 27.1 SDK。
 
 > 竖向栏中系统给 tabBar 的宿主容器只参与绘制、不参与命中测试，item container 收不到点击。`ESTabBarController` 会自动安装 window 级点击兜底；可重写 `didTapVerticalBarItem(at:)` 自定义点击行为，若已有自己的兜底实现，可将 `isVerticalBarTapFallbackEnabled` 设为 `false`。
 

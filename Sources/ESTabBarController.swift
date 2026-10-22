@@ -63,6 +63,9 @@ open class ESTabBarController: UITabBarController, ESTabBarDelegate {
 
     /// Duo 竖栏兜底手势，由 window 持有。
     internal weak var verticalBarFallbackGesture: UITapGestureRecognizer?
+
+    /// 竖向栏宿主容器的原始背景色，退出竖向布局时恢复。
+    internal var verticalBarHostBackgrounds: [(view: UIView, color: UIColor)] = []
     
     /// Observer tabBarController's selectedViewController. change its selection when it will-set.
     open override var selectedViewController: UIViewController? {

@@ -126,6 +126,20 @@ open class ESTabBar: UITabBar {
     public var itemFrames: [CGRect] {
         containers.map { $0.frame }
     }
+    /// 竖向布局时包裹自定义 item 的胶囊背景（tabBar 坐标）。无胶囊时为 `nil`。
+    internal private(set) var verticalBarCapsuleFrame: CGRect?
+    /// 胶囊背景相对 item 容器的留白。
+    private let verticalBarCapsuleInsets = UIEdgeInsets(top: 8.0, left: 6.0, bottom: 8.0, right: 6.0)
+    /// 竖栏中 item 容器距胶囊左右边缘的留白。
+    private let verticalBarItemHorizontalInset: CGFloat = 6.0
+    private var verticalBarCapsuleView: UIView?
+    private var verticalBarHiddenViews = NSHashTable<UIView>.weakObjects()
+    private var isVerticalBarChromeApplied = false
+    private var verticalBarSavedBackgroundColor: UIColor?
+    private var verticalBarSavedIsOpaque: Bool = true
+    private var verticalBarSavedIsTranslucent: Bool = true
+    private var verticalBarSavedStandardAppearance: UITabBarAppearance?
+    private var verticalBarSavedScrollEdgeAppearance: UITabBarAppearance?
     #if DEBUG
     private var lastDebugLayoutDescription: String?
     #endif
@@ -165,11 +179,19 @@ open class ESTabBar: UITabBar {
     
     open override func layoutSubviews() {
         super.layoutSubviews()
-        self.applyLiquidGlassCompatibilityIfNeeded()
         self.updateLayout()
+        self.applyLiquidGlassCompatibilityIfNeeded()
+        self.updateVerticalBarHorizontalAlignment()
         #if DEBUG
         self.debugLogLayoutIfNeeded()
         #endif
+    }
+    
+    open override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if isVerticalLayout {
+            setNeedsLayout()
+        }
     }
     
     open override func didAddSubview(_ subview: UIView) {
@@ -264,6 +286,10 @@ internal extension ESTabBar /* Layout */ {
         }
         
         let vertical = updateVerticalLayoutState()
+        updateVerticalBarChromeIfNeeded(isVertical: vertical)
+        if !vertical || !hasCustomItems || isCustomizing {
+            hideVerticalBarCapsule()
+        }
         let tabBarButtons = systemTabBarButtons()
         
         if isCustomizing {
@@ -356,14 +382,93 @@ internal extension ESTabBar /* Layout */ {
             tabBarButton.isHidden = true
         }
         
-        if let frames = verticalItemFrames(for: tabBarItems, tabBarButtons: tabBarButtons) {
-            for (idx, container) in containers.enumerated() where idx < frames.count {
-                container.frame = frames[idx]
+        if let frames = verticalItemFrames(for: tabBarItems, tabBarButtons: tabBarButtons), let first = frames.first {
+            let union = frames.dropFirst().reduce(first) { $0.union($1) }
+            let availableWidth = max(0, bounds.width - itemEdgeInsets.left - itemEdgeInsets.right)
+            let centerX = itemEdgeInsets.left + availableWidth / 2.0
+            var dx = centerX - union.midX
+            if union.width <= bounds.width {
+                if union.minX + dx < bounds.minX {
+                    dx += bounds.minX - (union.minX + dx)
+                }
+                if union.maxX + dx > bounds.maxX {
+                    dx -= (union.maxX + dx) - bounds.maxX
+                }
             }
+            for (idx, frame) in frames.enumerated() where idx < containers.count {
+                containers[idx].frame = frame.offsetBy(dx: dx, dy: 0)
+            }
+            layoutVerticalBarCapsule()
             return
         }
         
         layoutContainersWithVerticalFallback()
+    }
+    
+    /// 竖栏中 item 列的水平位置。宽度沿用系统竖栏列，但水平居中于 ESTabBar，避免竖栏比内容列宽时整体偏向一侧。
+    private func verticalBarContentColumn() -> (left: CGFloat, width: CGFloat) {
+        let horizontalInset = verticalBarItemHorizontalInset
+        let availableWidth = max(0, bounds.width - itemEdgeInsets.left - itemEdgeInsets.right)
+        var columnWidth = availableWidth
+        if let column = verticalBarColumnRect(), column.width > 0 {
+            columnWidth = min(column.width, availableWidth)
+        }
+        let contentWidth = max(0, columnWidth - horizontalInset * 2.0)
+        let centerX = itemEdgeInsets.left + availableWidth / 2.0
+        return (centerX - contentWidth / 2.0, contentWidth)
+    }
+    
+    /// ESTabBar 的 frame 可能比系统状态栏所在的竖列更宽。这里把整条 bar 的可见内容水平平移到状态栏列中心，
+    /// 这样 item 既能保持相对 ESTabBar 居中，又能和系统状态栏图标对齐。
+    private func updateVerticalBarHorizontalAlignment() {
+        guard isVerticalLayout,
+              hasCustomItems,
+              !isCustomizing,
+              let window = window,
+              let column = verticalBarColumnInWindow()
+        else {
+            if transform != .identity {
+                transform = .identity
+            }
+            return
+        }
+        let contentCenterInBar = verticalBarCapsuleFrame?.midX ?? bounds.midX
+        let contentCenterInWindow = convert(CGPoint(x: contentCenterInBar, y: bounds.midY), to: window).x
+        let offset = column.midX - contentCenterInWindow
+        guard abs(offset) > 0.01 else {
+            return
+        }
+        var targetTransform = transform
+        targetTransform.tx += offset
+        if transform != targetTransform {
+            transform = targetTransform
+        }
+    }
+    
+    private func verticalBarColumnInWindow() -> CGRect? {
+        guard #available(iOS 27.1, *), let window = window, let superview = superview else {
+            return nil
+        }
+        let rectEdge: UIRectEdge
+        switch traitCollection.verticalBarEdge {
+        case .leading:
+            rectEdge = .left
+        case .trailing:
+            rectEdge = .right
+        case .unspecified:
+            // Use the system-managed center, not the visual transform, to resolve the edge.
+            let barCenter = superview.convert(center, to: window)
+            rectEdge = barCenter.x > window.bounds.midX ? .right : .left
+        @unknown default:
+            return nil
+        }
+        let region = UIView.LayoutRegion.bar(onEdge: rectEdge, extent: 48.0)
+        let edgeInsets = window.edgeInsets(for: region)
+        let column = window.bounds.inset(by: edgeInsets)
+        guard column.width > 0, column.height > 0 else {
+            return nil
+        }
+        return column
     }
     
     private func verticalItemFrames(for tabBarItems: [UITabBarItem], tabBarButtons: [UIView]) -> [CGRect]? {
@@ -424,6 +529,7 @@ internal extension ESTabBar /* Layout */ {
     
     private func layoutContainersWithVerticalFallback() {
         guard !containers.isEmpty else {
+            hideVerticalBarCapsule()
             return
         }
         let insets = layoutSafeAreaInsets
@@ -434,33 +540,15 @@ internal extension ESTabBar /* Layout */ {
         let bottom = insetBottom + itemEdgeInsets.bottom
         let height = max(0, bounds.height - top - bottom)
         guard height > 0 else {
+            hideVerticalBarCapsule()
             return
         }
         
-        let left: CGFloat
-        let width: CGFloat
-        if let column = verticalBarColumnRect() {
-            // The system vertical bar is a narrow column near the window edge. Center the
-            // items in that column so they line up with the status bar icons.
-            left = column.minX
-            width = column.width
-        } else {
-            // The vertical bar is already positioned inside the window's trailing safe area.
-            // UIKit can report a horizontal safe area larger than the bar itself; applying it
-            // would collapse the item width to zero.
-            let horizontalSafeInsets = insets.left + insets.right
-            let insetLeft = horizontalSafeInsets < bounds.width ? insets.left : 0
-            let insetRight = horizontalSafeInsets < bounds.width ? insets.right : 0
-            var fallbackLeft = insetLeft + itemEdgeInsets.left
-            var fallbackWidth = max(0, bounds.width - fallbackLeft - insetRight - itemEdgeInsets.right)
-            if fallbackWidth <= 0 {
-                fallbackLeft = itemEdgeInsets.left
-                fallbackWidth = max(0, bounds.width - itemEdgeInsets.left - itemEdgeInsets.right)
-            }
-            left = fallbackLeft
-            width = fallbackWidth
-        }
+        let column = verticalBarContentColumn()
+        let left = column.left
+        let width = column.width
         guard width > 0 else {
+            hideVerticalBarCapsule()
             return
         }
         
@@ -473,32 +561,162 @@ internal extension ESTabBar /* Layout */ {
             container.frame = CGRect(x: left, y: y, width: width, height: itemHeight)
             y += itemHeight
         }
+        layoutVerticalBarCapsule()
+    }
+    
+    private func layoutVerticalBarCapsule() {
+        guard isVerticalLayout, hasCustomItems, !isCustomizing else {
+            hideVerticalBarCapsule()
+            return
+        }
+        let frames = containers.map { $0.frame }.filter { $0.width > 1.0 && $0.height > 1.0 }
+        guard let first = frames.first else {
+            hideVerticalBarCapsule()
+            return
+        }
+        let union = frames.dropFirst().reduce(first) { $0.union($1) }
+        var frame = union.inset(by: UIEdgeInsets(top: -verticalBarCapsuleInsets.top,
+                                                 left: -verticalBarCapsuleInsets.left,
+                                                 bottom: -verticalBarCapsuleInsets.bottom,
+                                                 right: -verticalBarCapsuleInsets.right))
+        if bounds.width > 0, bounds.height > 0 {
+            frame = frame.intersection(bounds)
+        }
+        guard frame.width > 1.0, frame.height > 1.0 else {
+            hideVerticalBarCapsule()
+            return
+        }
+        
+        let capsule = ensureVerticalBarCapsuleView()
+        capsule.frame = frame
+        capsule.layer.cornerRadius = min(frame.width, frame.height) / 2.0
+        let displayScale = max(traitCollection.displayScale, window?.traitCollection.displayScale ?? 0)
+        capsule.layer.borderWidth = 1.0 / max(displayScale, 1.0)
+        capsule.layer.borderColor = verticalBarCapsuleBorderColor.resolvedColor(with: traitCollection).cgColor
+        capsule.isHidden = false
+        verticalBarCapsuleFrame = frame
+        bringSubviewToFront(capsule)
+        for container in containers {
+            bringSubviewToFront(container)
+        }
+    }
+    
+    private func ensureVerticalBarCapsuleView() -> UIView {
+        if let capsule = verticalBarCapsuleView {
+            if capsule.superview == nil {
+                insertSubview(capsule, at: 0)
+            }
+            return capsule
+        }
+        let capsule = UIView(frame: .zero)
+        capsule.isUserInteractionEnabled = false
+        capsule.isHidden = true
+        capsule.accessibilityElementsHidden = true
+        capsule.layer.masksToBounds = true
+        capsule.backgroundColor = verticalBarCapsuleFillColor
+        capsule.layer.borderColor = verticalBarCapsuleBorderColor.cgColor
+        insertSubview(capsule, at: 0)
+        verticalBarCapsuleView = capsule
+        return capsule
+    }
+    
+    private func hideVerticalBarCapsule() {
+        verticalBarCapsuleView?.isHidden = true
+        verticalBarCapsuleFrame = nil
+    }
+    
+    private var verticalBarCapsuleFillColor: UIColor {
+        if #available(iOS 13.0, *) {
+            return UIColor.systemBackground.withAlphaComponent(0.92)
+        }
+        return UIColor.white.withAlphaComponent(0.92)
+    }
+    
+    private var verticalBarCapsuleBorderColor: UIColor {
+        if #available(iOS 13.0, *) {
+            return UIColor { traitCollection in
+                if traitCollection.userInterfaceStyle == .dark {
+                    return UIColor(white: 1.0, alpha: 0.28)
+                }
+                return UIColor(white: 0.0, alpha: 0.18)
+            }
+        }
+        return UIColor(white: 0.0, alpha: 0.18)
+    }
+    
+    private func updateVerticalBarChromeIfNeeded(isVertical: Bool) {
+        let shouldApply = isVertical && hasCustomItems && !isCustomizing
+        if shouldApply {
+            applyVerticalBarChromeIfNeeded()
+            hideVerticalBarSystemSubviews()
+        } else {
+            restoreVerticalBarChromeIfNeeded()
+        }
+    }
+    
+    private func applyVerticalBarChromeIfNeeded() {
+        if !isVerticalBarChromeApplied {
+            verticalBarSavedBackgroundColor = backgroundColor
+            verticalBarSavedIsOpaque = isOpaque
+            verticalBarSavedIsTranslucent = isTranslucent
+            verticalBarSavedStandardAppearance = standardAppearance
+            verticalBarSavedScrollEdgeAppearance = scrollEdgeAppearance
+            let appearance = standardAppearance.copy()
+            appearance.configureWithTransparentBackground()
+            standardAppearance = appearance
+            scrollEdgeAppearance = appearance
+            isVerticalBarChromeApplied = true
+        }
+        backgroundColor = .clear
+        isOpaque = false
+        isTranslucent = true
+    }
+    
+    private func restoreVerticalBarChromeIfNeeded() {
+        let hiddenViews = verticalBarHiddenViews.allObjects
+        guard isVerticalBarChromeApplied || !hiddenViews.isEmpty else {
+            return
+        }
+        for subview in hiddenViews {
+            subview.isHidden = false
+        }
+        verticalBarHiddenViews.removeAllObjects()
+        guard isVerticalBarChromeApplied else {
+            return
+        }
+        backgroundColor = verticalBarSavedBackgroundColor
+        isOpaque = verticalBarSavedIsOpaque
+        isTranslucent = verticalBarSavedIsTranslucent
+        if let appearance = verticalBarSavedStandardAppearance {
+            standardAppearance = appearance
+        }
+        scrollEdgeAppearance = verticalBarSavedScrollEdgeAppearance
+        verticalBarSavedStandardAppearance = nil
+        verticalBarSavedScrollEdgeAppearance = nil
+        verticalBarSavedBackgroundColor = nil
+        isVerticalBarChromeApplied = false
+    }
+    
+    /// 竖向胶囊布局期间，系统背景/玻璃/按钮不应绘制，否则整条竖栏仍会被系统背景铺满。
+    private func hideVerticalBarSystemSubviews() {
+        guard isVerticalLayout else {
+            return
+        }
+        let capsule = verticalBarCapsuleView
+        for subview in subviews {
+            if subview === capsule || containers.contains(where: { $0 === subview }) {
+                continue
+            }
+            if subview.isHidden {
+                continue
+            }
+            verticalBarHiddenViews.add(subview)
+            subview.isHidden = true
+        }
     }
     
     private func verticalBarColumnRect() -> CGRect? {
-        guard #available(iOS 27.1, *) else {
-            return nil
-        }
-        guard let window = self.window else {
-            return nil
-        }
-        let rectEdge: UIRectEdge
-        switch traitCollection.verticalBarEdge {
-        case .leading:
-            rectEdge = .left
-        case .trailing:
-            rectEdge = .right
-        case .unspecified:
-            let barFrame = self.convert(self.bounds, to: window)
-            rectEdge = barFrame.midX > window.bounds.midX ? .right : .left
-        @unknown default:
-            return nil
-        }
-        // 48pt is the measured width of the system's vertical tab column on iPhone Duo (iOS 27.1).
-        let region = UIView.LayoutRegion.bar(onEdge: rectEdge, extent: 48.0)
-        let edgeInsets = window.edgeInsets(for: region)
-        let columnInWindow = window.bounds.inset(by: edgeInsets)
-        guard columnInWindow.width > 0, columnInWindow.height > 0 else {
+        guard let window = window, let columnInWindow = verticalBarColumnInWindow() else {
             return nil
         }
         let column = self.convert(columnInWindow, from: window)
@@ -775,6 +993,9 @@ internal extension ESTabBar /* Actions */ {
         guard let tabBarItems = self.items else {
             ESTabBarController.printError("empty items")
             return
+        }
+        if hasCustomItems {
+            _ = ensureVerticalBarCapsuleView()
         }
         for (idx, item) in tabBarItems.enumerated() {
             let container = ESTabBarItemContainer.init(self, tag: 1000 + idx)
