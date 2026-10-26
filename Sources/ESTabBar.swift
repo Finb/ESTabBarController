@@ -182,6 +182,7 @@ open class ESTabBar: UITabBar {
         self.updateLayout()
         self.applyLiquidGlassCompatibilityIfNeeded()
         self.updateVerticalBarHorizontalAlignment()
+        self.correctHorizontalBarOriginIfNeeded()
         #if DEBUG
         self.debugLogLayoutIfNeeded()
         #endif
@@ -443,6 +444,27 @@ internal extension ESTabBar /* Layout */ {
         if transform != targetTransform {
             transform = targetTransform
         }
+    }
+    
+    /// Duo 从竖向栏切回横向底栏时，系统会保留竖栏时期的 x 原点，导致整条 tabBar 偏移到屏幕外。
+    private func correctHorizontalBarOriginIfNeeded() {
+        guard #available(iOS 27.1, *),
+              !isVerticalLayout,
+              transform == .identity,
+              let host = superview
+        else {
+            return
+        }
+        let hostWidth = host.bounds.width
+        guard hostWidth > 1,
+              abs(bounds.width - hostWidth) <= 0.5,
+              abs(frame.minX - host.bounds.minX) > 0.5
+        else {
+            return
+        }
+        var corrected = frame
+        corrected.origin.x = host.bounds.minX
+        self.frame = corrected
     }
     
     private func verticalBarColumnInWindow() -> CGRect? {
